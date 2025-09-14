@@ -8,12 +8,16 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# เพิ่ม endpoint นี้เพื่อป้องกัน Error 404
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the YOLOv8 Training API. Use /train endpoint to start training."}
+
 # ใช้ Environment Variable สำหรับ Render Disk Path
 RENDER_DISK_PATH = os.getenv("RENDER_DISK_PATH") or "./training_sessions"
 if not os.path.exists(RENDER_DISK_PATH):
     os.makedirs(RENDER_DISK_PATH)
 
-# Dictionary สำหรับเก็บข้อมูล Process
 training_processes = {}
 
 class TrainingRequest(BaseModel):
@@ -24,7 +28,6 @@ class TrainingRequest(BaseModel):
 def run_training_in_background(training_id: str, dataset_path: str, config_path: str):
     log_file = os.path.join(RENDER_DISK_PATH, f"{training_id}_log.txt")
     
-    # Run training_worker.py in a subprocess
     p = subprocess.Popen(
         ["python", "training_worker.py", training_id, dataset_path, config_path, RENDER_DISK_PATH],
         stdout=subprocess.PIPE,
@@ -35,7 +38,6 @@ def run_training_in_background(training_id: str, dataset_path: str, config_path:
     training_processes[training_id] = {'process': p, 'status': 'training', 'log': ''}
     
     try:
-        # Read stdout line by line and save to log file
         for line in p.stdout:
             with open(log_file, "a") as f:
                 f.write(line)
@@ -57,7 +59,6 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
     dataset_path = request.dataset_path
     config_path = request.config_path
 
-    # เริ่มการเทรนใน Background Task
     background_tasks.add_task(run_training_in_background, training_id, dataset_path, config_path)
     
     return {"status": "success", "message": "Training started.", "training_id": training_id}
