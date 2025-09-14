@@ -50,7 +50,8 @@ async def upload_files(dataset: UploadFile = File(...), yaml_file: UploadFile = 
         yaml_data = yaml.safe_load(f)
 
     yaml_data["train"] = os.path.join(dataset_root, "train/images")
-    yaml_data["val"] = os.path.join(dataset_root, "valid/images")
+    yaml_data["val"] = os.path.join(dataset_root, "val/images")  # แก้จาก valid เป็น val
+
 
     with open(yaml_path, "w") as f:
         yaml.dump(yaml_data, f)
