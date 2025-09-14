@@ -5,6 +5,7 @@ import json
 import psutil
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+from fastapi.responses import FileResponse
 
 app = FastAPI()
 
@@ -63,7 +64,6 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
     
     return {"status": "success", "message": "Training started.", "training_id": training_id}
 
-# API สำหรับ Pause, Resume, Stop
 @app.post("/pause")
 async def pause_training(request: TrainingRequest):
     if request.training_id not in training_processes:
@@ -92,7 +92,6 @@ async def stop_training(request: TrainingRequest):
     del training_processes[request.training_id]
     return {"status": "success", "message": "Training stopped."}
 
-# API สำหรับตรวจสอบ Progress
 @app.get("/progress/{training_id}")
 async def get_progress(training_id: str):
     log_file = os.path.join(RENDER_DISK_PATH, f"{training_id}_log.txt")
@@ -107,3 +106,16 @@ async def get_progress(training_id: str):
         status = 'completed'
     
     return {"status": status, "log": log_content}
+
+@app.get("/download/{training_id}")
+async def download_model(training_id: str):
+    model_path = os.path.join(RENDER_DISK_PATH, "runs", "detect", f"train_yolov8_{training_id}", "weights", "best.pt")
+    
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="Model file not found.")
+
+    return FileResponse(
+        path=model_path,
+        filename=f"yolov8_{training_id}_best.pt",
+        media_type='application/octet-stream'
+    )
