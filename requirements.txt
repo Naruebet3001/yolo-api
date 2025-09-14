@@ -2,3 +2,4 @@ fastapi
 uvicorn
 ultralytics
 psutil
+python-multipart  # Add this line
