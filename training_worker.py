@@ -10,15 +10,12 @@ def run_yolo_training(training_id: str, dataset_path: str, config_path: str, out
     print(f"Config path: {config_path}")
 
     try:
-        # Unzip dataset
         unzip_dir = os.path.join(os.path.dirname(dataset_path), 'dataset')
         with zipfile.ZipFile(dataset_path, 'r') as zip_ref:
             zip_ref.extractall(unzip_dir)
             
-        # Copy config file
         shutil.copy(config_path, unzip_dir)
 
-        # Start training
         model = YOLO("yolov8n.pt")
         model.train(
             data=os.path.join(unzip_dir, os.path.basename(config_path)),
