@@ -22,14 +22,13 @@ LOG_FILE = os.path.join(LOG_DIR, "train.log")
 process = None
 
 # ---------------- AUTH GOOGLE DRIVE ----------------
-gauth = GoogleAuth()
-gauth.LoadServiceConfigSettings({
+gauth = GoogleAuth(settings={
     "client_config_backend": "service",
     "service_config": {
-        "client_json_file_path": "credentials.json"  # ต้องอัปโหลดไฟล์นี้ไปที่ Render
+        "client_json_file_path": "credentials.json"  # ไฟล์ Service Account JSON ที่ต้องอัปโหลดไป Render
     }
 })
-gauth.Authorize()
+gauth.ServiceAuth()  # ใช้ Service Account login
 drive = GoogleDrive(gauth)
 
 def upload_to_drive(local_path, parent_folder_id=GDRIVE_FOLDER_ID):
