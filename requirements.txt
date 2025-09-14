@@ -1,8 +1,4 @@
 fastapi
 uvicorn
-pydantic
-pyyaml
-gdown
-pydrive2
 ultralytics
-python-multipart
+psutil
