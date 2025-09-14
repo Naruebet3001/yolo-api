@@ -11,7 +11,7 @@ UPLOAD_DIR = "./uploads"
 DATASET_DIR = "./dataset"
 LOG_DIR = "./logs"
 MODEL_DIR = "./runs/exp1/weights"
-GDRIVE_FOLDER_ID = "1_7QhyLeXSQRSkXo57R3QeIBW7Q68WmMT"  # folder สำหรับเก็บ dataset + yaml
+GDRIVE_FOLDER_ID = "1_7QhyLeXSQRSkXo57R3QeIBW7Q68WmMT"  # โฟลเดอร์ Google Drive
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(DATASET_DIR, exist_ok=True)
@@ -23,7 +23,13 @@ process = None
 
 # ---------------- AUTH GOOGLE DRIVE ----------------
 gauth = GoogleAuth()
-gauth.LoadServiceConfigFile("credentials.json")  # service account
+gauth.LoadServiceConfigSettings({
+    "client_config_backend": "service",
+    "service_config": {
+        "client_json_file_path": "credentials.json"  # ต้องอัปโหลดไฟล์นี้ไปที่ Render
+    }
+})
+gauth.Authorize()
 drive = GoogleDrive(gauth)
 
 def upload_to_drive(local_path, parent_folder_id=GDRIVE_FOLDER_ID):
@@ -65,7 +71,7 @@ async def upload_files(dataset: UploadFile = File(...), yaml_file: UploadFile = 
     dataset_id = upload_to_drive(dataset_path)
     yaml_id = upload_to_drive(yaml_path)
 
-    # Cleanup local files (optional)
+    # Cleanup local files
     os.remove(dataset_path)
     os.remove(yaml_path)
 
@@ -94,7 +100,7 @@ def train_model(req: TrainRequest):
 
     dataset_root = DATASET_DIR
     yaml_data["train"] = os.path.join(dataset_root, "train/images")
-    yaml_data["val"] = os.path.join(dataset_root, "val/images")  # ต้องตรงกับโฟลเดอร์จริง
+    yaml_data["val"] = os.path.join(dataset_root, "val/images")
 
     with open(yaml_path, "w") as f:
         yaml.dump(yaml_data, f)
