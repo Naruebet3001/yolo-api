@@ -1,20 +1,23 @@
 from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import subprocess, os, signal, zipfile, yaml, shutil
 
 app = FastAPI()
 
+# โฟลเดอร์หลัก
 UPLOAD_DIR = "./uploads"
+DATASET_DIR = "./dataset"
 LOG_DIR = "./logs"
 MODEL_DIR = "./runs/exp1/weights"
 
-# สร้างโฟลเดอร์ที่จำเป็นหากยังไม่มี
+# สร้างโฟลเดอร์ถ้ายังไม่มี
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(DATASET_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True) # เพิ่มการสร้างโฟลเดอร์สำหรับโมเดล
 
 LOG_FILE = os.path.join(LOG_DIR, "train.log")
-process = None
+process = None  # ตัว handle subprocess
 
 class TrainRequest(BaseModel):
     resume: bool = False
@@ -25,74 +28,52 @@ def root():
 
 @app.post("/upload")
 async def upload_files(dataset: UploadFile = File(...), yaml_file: UploadFile = File(...)):
-    """
-    อัปโหลดไฟล์ dataset.zip และ config.yaml
-    จากนั้นแตกไฟล์และแก้ไขพาธใน config.yaml
-    """
-    
-    # 1. จัดการการอัปโหลดไฟล์
+    # Save uploaded files
     dataset_path = os.path.join(UPLOAD_DIR, "dataset.zip")
     yaml_path = os.path.join(UPLOAD_DIR, "config.yaml")
 
-    # บันทึกไฟล์ที่อัปโหลด
     with open(dataset_path, "wb") as f:
         f.write(await dataset.read())
     with open(yaml_path, "wb") as f:
         f.write(await yaml_file.read())
 
-    # 2. แตกไฟล์ dataset.zip
-    # ลบโฟลเดอร์ dataset เดิมทิ้งก่อนเพื่อป้องกันปัญหา
-    dataset_root = os.path.join(UPLOAD_DIR, "dataset")
-    if os.path.exists(dataset_root):
-        shutil.rmtree(dataset_root)
-    os.makedirs(dataset_root, exist_ok=True)
-    
-    with zipfile.ZipFile(dataset_path, "r") as zip_ref:
-        zip_ref.extractall(dataset_root)
+    # แตกไฟล์ zip
+    if os.path.exists(DATASET_DIR):
+        shutil.rmtree(DATASET_DIR)
+    os.makedirs(DATASET_DIR, exist_ok=True)
 
-    # 3. แก้ไขพาธใน config.yaml ให้ถูกต้อง
+    with zipfile.ZipFile(dataset_path, "r") as zip_ref:
+        zip_ref.extractall(DATASET_DIR)
+
+    # หาโฟลเดอร์ dataset (เช่น dataset/train, dataset/val)
+    dataset_subdirs = [d for d in os.listdir(DATASET_DIR) if os.path.isdir(os.path.join(DATASET_DIR, d))]
+    dataset_root = os.path.join(DATASET_DIR, dataset_subdirs[0]) if dataset_subdirs else DATASET_DIR
+
+    # แก้ path ใน yaml
     with open(yaml_path, "r") as f:
         yaml_data = yaml.safe_load(f)
 
-    # YOLOv8 จะใช้ 'path' เป็นพาธหลักของ dataset
-    # ส่วน 'train' และ 'val' เป็นโฟลเดอร์ย่อยภายในพาธหลัก
-    # หาชื่อโฟลเดอร์หลักที่ถูกแตกจาก zip ไฟล์
-    dataset_subdirs = [d for d in os.listdir(dataset_root) if os.path.isdir(os.path.join(dataset_root, d))]
-    
-    # ถ้ามีโฟลเดอร์ย่อยเพียงอันเดียว ให้ใช้โฟลเดอร์นั้นเป็นพาธหลัก
-    if len(dataset_subdirs) == 1:
-        base_path = os.path.join(dataset_root, dataset_subdirs[0])
-        yaml_data["path"] = base_path
-        yaml_data["train"] = "train/images"
-        yaml_data["val"] = "valid/images"
-    else:
-        # กรณี zip ไฟล์มีโฟลเดอร์ train และ valid อยู่ข้างในโดยตรง
-        yaml_data["path"] = dataset_root
-        yaml_data["train"] = "train/images"
-        yaml_data["val"] = "valid/images"
+    # แก้ path ให้ YOLOv8
+    yaml_data["train"] = os.path.join(dataset_root, "train/images")
+    yaml_data["val"] = os.path.join(dataset_root, "val/images")  # YOLO ใช้ val แทน valid
 
-    # บันทึกไฟล์ YAML ที่แก้ไขแล้วทับไฟล์เดิม
     with open(yaml_path, "w") as f:
         yaml.dump(yaml_data, f)
 
-    return {"status": "uploaded", "dataset_path": dataset_root, "yaml_path": yaml_path}
+    return {"status": "uploaded", "yaml": yaml_path, "dataset_root": dataset_root}
 
 @app.post("/train")
 def train_model(req: TrainRequest):
-    """
-    เริ่มกระบวนการฝึกโมเดล YOLOv8
-    """
     global process
 
+    # เขียน log เริ่มต้น
     with open(LOG_FILE, "w") as f:
         f.write("Starting training...\n")
 
-    # ใช้พาธของไฟล์ config.yaml ที่ได้รับการแก้ไขแล้วในโฟลเดอร์ UPLOAD_DIR
-    config_path = os.path.join(UPLOAD_DIR, 'config.yaml')
-    
+    # คำสั่ง train YOLOv8
     cmd = [
         "yolo", "detect", "train",
-        f"data={config_path}",
+        f"data={os.path.join(UPLOAD_DIR, 'config.yaml')}",
         "model=yolov8n.pt",
         "epochs=50",
         "project=./runs",
@@ -101,6 +82,7 @@ def train_model(req: TrainRequest):
     if req.resume:
         cmd.append("resume=True")
 
+    # รัน subprocess background
     with open(LOG_FILE, "a") as f:
         process = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
 
@@ -108,31 +90,24 @@ def train_model(req: TrainRequest):
 
 @app.post("/stop")
 def stop_train():
-    """
-    หยุดกระบวนการฝึกโมเดลที่กำลังทำงานอยู่
-    """
     global process
-    if process and process.poll() is None:
+    if process:
         process.terminate()
+        process = None
         return {"status": "stopped"}
     return {"status": "no process running"}
 
 @app.get("/logs")
 def get_logs():
-    """
-    แสดงล็อกของกระบวนการฝึก
-    """
     if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
+        with open(LOG_FILE) as f:
             return {"logs": f.read()}
     return {"logs": "No logs yet."}
 
 @app.get("/download")
 def download_model():
-    """
-    ตรวจสอบและให้ลิงก์สำหรับดาวน์โหลดโมเดลที่ดีที่สุด
-    """
     best_model = os.path.join(MODEL_DIR, "best.pt")
     if os.path.exists(best_model):
-        return {"download_url": best_model}
+        # ส่งไฟล์ model ให้ดาวน์โหลด
+        return FileResponse(best_model, filename="best.pt")
     return {"error": "Model not found yet."}
