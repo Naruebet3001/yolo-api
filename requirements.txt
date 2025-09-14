@@ -5,3 +5,4 @@ pyyaml
 gdown
 pydrive2
 ultralytics
+python-multipart
