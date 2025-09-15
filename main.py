@@ -1,99 +1,86 @@
-from flask import Flask, request, jsonify, send_from_directory
-from ultralytics import YOLO
-import threading
-import os
-import shutil
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse, PlainTextResponse
+import shutil, subprocess, os, signal
 
-app = Flask(__name__)
+app = FastAPI()
 
-# โฟลเดอร์สำหรับเก็บไฟล์ที่อัปโหลดและผลลัพธ์
-UPLOAD_FOLDER = 'uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+UPLOAD_DIR = "datasets"
+LOG_DIR = "logs"
+RUNS_DIR = "runs"
+PID_FILE = "train_pid.txt"
 
-# สถานะการเทรน
-# ใช้ dict แทนการใช้ไฟล์ เพื่อให้จัดการได้ง่ายขึ้น (เหมาะสำหรับ Threading)
-training_status = {}
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(RUNS_DIR, exist_ok=True)
 
-def train_model(training_id, yaml_path, zip_path):
-    try:
-        # อัปเดตสถานะเป็น "training"
-        training_status[training_id] = {'status': 'training', 'log': ''}
-        
-        # คลายไฟล์ dataset.zip
-        shutil.unpack_archive(zip_path, f'{UPLOAD_FOLDER}/{training_id}/dataset')
 
-        # เริ่มเทรน
-        model = YOLO('yolov8n.pt')  # ใช้โมเดลที่ Pre-trained แล้ว
-        results = model.train(data=yaml_path, epochs=5, project=f'{UPLOAD_FOLDER}/{training_id}', name='runs/detect/train')
+@app.post("/upload")
+async def upload(dataset: UploadFile = File(...), config: UploadFile = File(...)):
+    dataset_path = os.path.join(UPLOAD_DIR, dataset.filename)
+    config_path = os.path.join(UPLOAD_DIR, config.filename)
 
-        # เมื่อเทรนเสร็จสิ้น
-        training_status[training_id]['status'] = 'completed'
-        
-    except Exception as e:
-        # กรณีเกิดข้อผิดพลาด
-        training_status[training_id]['status'] = 'error'
-        training_status[training_id]['log'] = str(e)
-        print(f"Error during training: {e}")
+    with open(dataset_path, "wb") as f:
+        shutil.copyfileobj(dataset.file, f)
+    with open(config_path, "wb") as f:
+        shutil.copyfileobj(config.file, f)
 
-@app.route('/train', methods=['POST'])
-def start_training():
-    data = request.form
-    training_id = data.get('training_id')
-    yaml_path = data.get('yaml_path')
-    zip_path = data.get('zip_path')
+    return {"status": "uploaded", "dataset": dataset.filename, "config": config.filename}
 
-    if not all([training_id, yaml_path, zip_path]):
-        return jsonify({'status': 'error', 'message': 'Missing data'}), 400
 
-    # รันการเทรนใน background thread
-    thread = threading.Thread(target=train_model, args=(training_id, yaml_path, zip_path))
-    thread.start()
-    
-    return jsonify({'status': 'training_started', 'training_id': training_id})
-
-@app.route('/status', methods=['GET'])
-def get_status():
-    training_id = request.args.get('id')
-    if training_id not in training_status:
-        return jsonify({'status': 'not_found', 'log_output': 'Training ID not found.'}), 404
-        
-    status = training_status[training_id]['status']
-    log_output = training_status[training_id]['log']
-    
-    # ดึง log จากไฟล์ล่าสุด
-    if status == 'training':
-        try:
-            log_file = f'{UPLOAD_FOLDER}/{training_id}/runs/detect/train/results.csv' # YOLOv8 บันทึก log ในไฟล์นี้
-            with open(log_file, 'r') as f:
-                log_output = f.read()
-        except FileNotFoundError:
-            log_output = 'Training has started, but logs are not yet available.'
-
-    return jsonify({'status': status, 'log_output': log_output})
-
-@app.route('/stop', methods=['GET'])
-def stop_training():
-    training_id = request.args.get('id')
-    if training_id in training_status:
-        training_status[training_id]['status'] = 'stopped'
-        # Note: การหยุด thread โดยตรงทำได้ยากและไม่ปลอดภัย
-        # วิธีนี้จะแค่เปลี่ยนสถานะให้ระบบรู้ว่าควรหยุด แต่การเทรนจริงจะรันจนจบ epoch
-        return jsonify({'status': 'training_stopped'})
-    return jsonify({'status': 'error', 'message': 'Training ID not found.'}), 404
-
-@app.route('/download', methods=['GET'])
-def download_model():
-    training_id = request.args.get('id')
-    model_path = f'{UPLOAD_FOLDER}/{training_id}/runs/detect/train/weights/best.pt'
-    
-    if os.path.exists(model_path):
-        return send_from_directory(
-            os.path.dirname(model_path), 
-            os.path.basename(model_path), 
-            as_attachment=True
+@app.get("/train")
+def train():
+    log_file = os.path.join(LOG_DIR, "train_log.txt")
+    with open(log_file, "w") as log:
+        process = subprocess.Popen(
+            ["python", "training_worker.py"],
+            stdout=log,
+            stderr=log,
         )
-    else:
-        return jsonify({'status': 'error', 'message': 'Model not found.'}), 404
+        with open(PID_FILE, "w") as f:
+            f.write(str(process.pid))
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    return {"status": "training started", "pid": process.pid}
+
+
+@app.get("/stop")
+def stop():
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE) as f:
+            pid = int(f.read())
+        try:
+            os.kill(pid, signal.SIGKILL)
+            return {"status": f"stopped training process {pid}"}
+        except ProcessLookupError:
+            return {"status": f"process {pid} not found"}
+    return {"status": "no process running"}
+
+
+@app.get("/resume")
+def resume():
+    log_file = os.path.join(LOG_DIR, "train_log.txt")
+    with open(log_file, "a") as log:
+        process = subprocess.Popen(
+            ["python", "train.py", "--resume"],
+            stdout=log,
+            stderr=log,
+        )
+        with open(PID_FILE, "w") as f:
+            f.write(str(process.pid))
+
+    return {"status": "resumed training", "pid": process.pid}
+
+
+@app.get("/logs")
+def get_logs():
+    log_file = os.path.join(LOG_DIR, "train_log.txt")
+    if os.path.exists(log_file):
+        return FileResponse(log_file, media_type="text/plain")
+    return PlainTextResponse("No logs yet.")
+
+
+@app.get("/download")
+def download_model():
+    model_path = os.path.join(RUNS_DIR, "detect", "train", "weights", "best.pt")
+    if os.path.exists(model_path):
+        return FileResponse(model_path, filename="best.pt")
+    return {"status": "no model yet"}
