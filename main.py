@@ -69,7 +69,8 @@ def train_yolo_model(job_id: str, data_path: str, model_name: str, job: Training
         results = model.train(
             data=data_path,
             epochs=10,
-            imgsz=640,
+            imgsz=320,  # Reduced image size to 320x320
+            batch=8,    # Reduced batch size to 8
         )
         
         job.set_status("completed")
@@ -205,6 +206,7 @@ async def download_model(job_id: str):
         raise HTTPException(status_code=404, detail="Model file not found")
         
     return FileResponse(path=file_path, filename=os.path.basename(file_path), media_type='application/octet-stream')
+
 
 
 
