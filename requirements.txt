@@ -1,4 +1,6 @@
-flask
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
 ultralytics
-gunicorn
-uvicorn
+torch
