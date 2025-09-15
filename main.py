@@ -26,7 +26,6 @@ app.add_middleware(
 )
 
 # Use a temporary directory within the project's working directory
-# This directory will be wiped on every service restart
 TEMP_DIR = "/tmp/yolo_data" 
 UPLOAD_DIR = os.path.join(TEMP_DIR, "uploads")
 MODEL_DIR = os.path.join(TEMP_DIR, "trained_models")
@@ -65,11 +64,8 @@ def train_yolo_model(job_id: str, data_path: str, model_name: str, job: Training
     try:
         job.set_status("training")
         
-        # Initialize YOLOv8 model
         model = YOLO("yolov8n.pt")
         
-        # NOTE: Removed 'callbacks' argument to fix the error.
-        # This will disable real-time progress updates and the ability to stop training.
         results = model.train(
             data=data_path,
             epochs=10,
@@ -119,13 +115,22 @@ async def upload_and_train(dataset: UploadFile = File(...), yaml_file: UploadFil
             
         dataset_root = os.path.join(job_dir, extracted_dirs[0])
         
+        # --- ส่วนที่แก้ไข ---
+        # อ่านและอัปเดต path ในไฟล์ YAML ให้เป็นแบบ Absolute Path
         with open(yaml_path, "r") as f:
             data_config = yaml.safe_load(f)
         
         data_config['path'] = dataset_root
         
+        if 'train' in data_config:
+            data_config['train'] = os.path.join(dataset_root, data_config['train'])
+        
+        if 'val' in data_config:
+            data_config['val'] = os.path.join(dataset_root, data_config['val'])
+
         with open(yaml_path, "w") as f:
             yaml.dump(data_config, f)
+        # --- สิ้นสุดการแก้ไข ---
 
         job = TrainingJob(job_id, user_id)
         job.data_dir = job_dir
@@ -173,7 +178,6 @@ async def stop_training(job_id: str):
 
     job = training_jobs[job_id]
     if job.status == "training":
-        # The stop functionality is now disabled
         return JSONResponse(content={"status": "Stop command sent, but feature is disabled"})
     else:
         return JSONResponse(content={"status": "Job is not currently training"})
