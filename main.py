@@ -1,133 +1,99 @@
+from flask import Flask, request, jsonify, send_from_directory
+from ultralytics import YOLO
+import threading
 import os
 import shutil
-import subprocess
-import psutil
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
 
-app = FastAPI()
+app = Flask(__name__)
 
-@app.get("/")
-async def read_root():
-    return {"message": "Welcome to the YOLOv8 Training API."}
+# โฟลเดอร์สำหรับเก็บไฟล์ที่อัปโหลดและผลลัพธ์
+UPLOAD_FOLDER = 'uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-RENDER_DISK_PATH = os.getenv("RENDER_DISK_PATH") or "./training_sessions"
-if not os.path.exists(RENDER_DISK_PATH):
-    os.makedirs(RENDER_DISK_PATH)
+# สถานะการเทรน
+# ใช้ dict แทนการใช้ไฟล์ เพื่อให้จัดการได้ง่ายขึ้น (เหมาะสำหรับ Threading)
+training_status = {}
 
-training_processes = {}
-
-class TrainingRequest(BaseModel):
-    training_id: str
-
-def run_training_in_background(training_id: str, unzip_dir: str, config_file: str):
-    log_file = os.path.join(RENDER_DISK_PATH, f"{training_id}_log.txt")
-    
-    p = subprocess.Popen(
-        ["python", "training_worker.py", training_id, unzip_dir, config_file, RENDER_DISK_PATH],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-    
-    training_processes[training_id] = {'process': p, 'status': 'training', 'log': ''}
-    
+def train_model(training_id, yaml_path, zip_path):
     try:
-        for line in p.stdout:
-            with open(log_file, "a") as f:
-                f.write(line)
-        p.wait()
+        # อัปเดตสถานะเป็น "training"
+        training_status[training_id] = {'status': 'training', 'log': ''}
         
-        if p.returncode == 0:
-            training_processes[training_id]['status'] = 'completed'
-        else:
-            training_processes[training_id]['status'] = 'failed'
-            
-    except Exception as e:
-        training_processes[training_id]['status'] = 'failed'
-        with open(log_file, "a") as f:
-            f.write(f"An error occurred: {str(e)}\n")
+        # คลายไฟล์ dataset.zip
+        shutil.unpack_archive(zip_path, f'{UPLOAD_FOLDER}/{training_id}/dataset')
 
-@app.post("/upload-and-train")
-async def upload_and_train(
-    training_id: str = Form(...),
-    dataset_zip: UploadFile = File(...),
-    config_yaml: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None
-):
-    try:
-        session_dir = os.path.join(RENDER_DISK_PATH, training_id)
-        os.makedirs(session_dir, exist_ok=True)
-        
-        dataset_path = os.path.join(session_dir, dataset_zip.filename)
-        config_path = os.path.join(session_dir, config_yaml.filename)
-        
-        with open(dataset_path, "wb") as f:
-            shutil.copyfileobj(dataset_zip.file, f)
-            
-        with open(config_path, "wb") as f:
-            shutil.copyfileobj(config_yaml.file, f)
-            
-        background_tasks.add_task(run_training_in_background, training_id, session_dir, config_path)
-        
-        return {"status": "success", "message": "Files uploaded and training started.", "training_id": training_id}
+        # เริ่มเทรน
+        model = YOLO('yolov8n.pt')  # ใช้โมเดลที่ Pre-trained แล้ว
+        results = model.train(data=yaml_path, epochs=5, project=f'{UPLOAD_FOLDER}/{training_id}', name='runs/detect/train')
+
+        # เมื่อเทรนเสร็จสิ้น
+        training_status[training_id]['status'] = 'completed'
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred during upload: {str(e)}")
+        # กรณีเกิดข้อผิดพลาด
+        training_status[training_id]['status'] = 'error'
+        training_status[training_id]['log'] = str(e)
+        print(f"Error during training: {e}")
 
-@app.post("/pause")
-async def pause_training(request: TrainingRequest):
-    if request.training_id not in training_processes:
-        raise HTTPException(status_code=404, detail="Training not found.")
-    proc = training_processes[request.training_id]['process']
-    psutil.Process(proc.pid).suspend()
-    training_processes[request.training_id]['status'] = 'paused'
-    return {"status": "success", "message": "Training paused."}
+@app.route('/train', methods=['POST'])
+def start_training():
+    data = request.form
+    training_id = data.get('training_id')
+    yaml_path = data.get('yaml_path')
+    zip_path = data.get('zip_path')
 
-@app.post("/resume")
-async def resume_training(request: TrainingRequest):
-    if request.training_id not in training_processes:
-        raise HTTPException(status_code=404, detail="Training not found.")
-    proc = training_processes[request.training_id]['process']
-    psutil.Process(proc.pid).resume()
-    training_processes[request.training_id]['status'] = 'training'
-    return {"status": "success", "message": "Training resumed."}
+    if not all([training_id, yaml_path, zip_path]):
+        return jsonify({'status': 'error', 'message': 'Missing data'}), 400
 
-@app.post("/stop")
-async def stop_training(request: TrainingRequest):
-    if request.training_id not in training_processes:
-        raise HTTPException(status_code=404, detail="Training not found.")
-    proc = training_processes[request.training_id]['process']
-    proc.terminate()
-    training_processes[request.training_id]['status'] = 'stopped'
-    del training_processes[request.training_id]
-    return {"status": "success", "message": "Training stopped."}
-
-@app.get("/progress/{training_id}")
-async def get_progress(training_id: str):
-    log_file = os.path.join(RENDER_DISK_PATH, f"{training_id}_log.txt")
-    if not os.path.exists(log_file):
-        return {"status": "not_found", "message": "Log file not found."}
+    # รันการเทรนใน background thread
+    thread = threading.Thread(target=train_model, args=(training_id, yaml_path, zip_path))
+    thread.start()
     
-    with open(log_file, "r") as f:
-        log_content = f.read()
+    return jsonify({'status': 'training_started', 'training_id': training_id})
 
-    status = training_processes.get(training_id, {}).get('status', 'not_found')
-    if status == 'not_found' and "Training completed successfully" in log_content:
-        status = 'completed'
+@app.route('/status', methods=['GET'])
+def get_status():
+    training_id = request.args.get('id')
+    if training_id not in training_status:
+        return jsonify({'status': 'not_found', 'log_output': 'Training ID not found.'}), 404
+        
+    status = training_status[training_id]['status']
+    log_output = training_status[training_id]['log']
     
-    return {"status": status, "log": log_content}
+    # ดึง log จากไฟล์ล่าสุด
+    if status == 'training':
+        try:
+            log_file = f'{UPLOAD_FOLDER}/{training_id}/runs/detect/train/results.csv' # YOLOv8 บันทึก log ในไฟล์นี้
+            with open(log_file, 'r') as f:
+                log_output = f.read()
+        except FileNotFoundError:
+            log_output = 'Training has started, but logs are not yet available.'
 
-@app.get("/download/{training_id}")
-async def download_model(training_id: str):
-    model_path = os.path.join(RENDER_DISK_PATH, "runs", "detect", f"train_yolov8_{training_id}", "weights", "best.pt")
+    return jsonify({'status': status, 'log_output': log_output})
 
-    if not os.path.exists(model_path):
-        raise HTTPException(status_code=404, detail="Model file not found.")
+@app.route('/stop', methods=['GET'])
+def stop_training():
+    training_id = request.args.get('id')
+    if training_id in training_status:
+        training_status[training_id]['status'] = 'stopped'
+        # Note: การหยุด thread โดยตรงทำได้ยากและไม่ปลอดภัย
+        # วิธีนี้จะแค่เปลี่ยนสถานะให้ระบบรู้ว่าควรหยุด แต่การเทรนจริงจะรันจนจบ epoch
+        return jsonify({'status': 'training_stopped'})
+    return jsonify({'status': 'error', 'message': 'Training ID not found.'}), 404
 
-    return FileResponse(
-        path=model_path,
-        filename=f"yolov8_{training_id}_best.pt",
-        media_type='application/octet-stream'
-    )
+@app.route('/download', methods=['GET'])
+def download_model():
+    training_id = request.args.get('id')
+    model_path = f'{UPLOAD_FOLDER}/{training_id}/runs/detect/train/weights/best.pt'
+    
+    if os.path.exists(model_path):
+        return send_from_directory(
+            os.path.dirname(model_path), 
+            os.path.basename(model_path), 
+            as_attachment=True
+        )
+    else:
+        return jsonify({'status': 'error', 'message': 'Model not found.'}), 404
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
