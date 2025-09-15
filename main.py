@@ -118,23 +118,25 @@ async def upload_and_train(dataset: UploadFile = File(...), yaml_file: UploadFil
         # --- ส่วนที่แก้ไข ---
         # อ่านและอัปเดต path ในไฟล์ YAML ให้เป็นแบบ Absolute Path
        # อ่าน YAML
+        # อ่าน YAML
         with open(yaml_path, "r") as f:
             data_config = yaml.safe_load(f)
         
-        # เปลี่ยน train/valid เป็น absolute path
+        # เปลี่ยน train/val เป็น absolute path
         if 'train' in data_config:
             data_config['train'] = os.path.abspath(os.path.join(dataset_root, data_config['train']))
         
-        if 'valid' in data_config:
-            valid_path = os.path.join(dataset_root, data_config['valid'])
-            if not os.path.exists(valid_path):
-                # ถ้า valid ไม่มี ให้ใช้ train แทน
-                valid_path = data_config['train']
-            data_config['valid'] = os.path.abspath(valid_path)
+        if 'val' in data_config:
+            val_path = os.path.join(dataset_root, data_config['val'])
+            if not os.path.exists(val_path):
+                # ถ้า val ไม่มี ให้ใช้ train แทน
+                val_path = data_config['train']
+            data_config['val'] = os.path.abspath(val_path)
         
         # เขียน YAML กลับ
         with open(yaml_path, "w") as f:
             yaml.dump(data_config, f)
+
 
         # --- สิ้นสุดการแก้ไข ---
 
@@ -203,5 +205,6 @@ async def download_model(job_id: str):
         raise HTTPException(status_code=404, detail="Model file not found")
         
     return FileResponse(path=file_path, filename=os.path.basename(file_path), media_type='application/octet-stream')
+
 
 
