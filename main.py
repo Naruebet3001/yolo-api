@@ -8,12 +8,13 @@ import threading
 import uuid
 import yaml
 import zipfile
+import asyncio
 
 app = FastAPI()
 
-# Add CORS middleware to allow cross-origin requests from the PHP frontend
+# Add CORS middleware to allow cross-origin requests
 origins = [
-    "*", # Allow all origins for simplicity in this example. In production, specify your frontend's domain.
+    "*"
 ]
 
 app.add_middleware(
@@ -24,9 +25,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Directory to store uploaded datasets and trained models
-UPLOAD_DIR = "/data/uploads" # Use a persistent disk path for Render
-MODEL_DIR = "/data/trained_models" # Use a persistent disk path for Render
+# Use a temporary directory within the project's working directory
+# This directory will be wiped on every service restart
+TEMP_DIR = "/tmp/yolo_data" 
+UPLOAD_DIR = os.path.join(TEMP_DIR, "uploads")
+MODEL_DIR = os.path.join(TEMP_DIR, "trained_models")
 
 # Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -35,7 +38,6 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 # Global dictionary to track training jobs
 training_jobs = {}
 
-# (ส่วนที่เหลือของโค้ดใน main.py เหมือนเดิมทุกประการ)
 class TrainingJob:
     def __init__(self, job_id, user_id):
         self.job_id = job_id
