@@ -68,31 +68,19 @@ def train_yolo_model(job_id: str, data_path: str, model_name: str, job: Training
         # Initialize YOLOv8 model
         model = YOLO("yolov8n.pt")
         
-        def on_epoch_end(trainer):
-            if job.is_stopped.is_set():
-                trainer.stop_training = True
-                return
-            
-            progress = (trainer.epoch + 1) / trainer.epochs
-            job.set_progress(progress * 100)
-            print(f"Job {job_id} - Epoch {trainer.epoch + 1}/{trainer.epochs} completed. Progress: {progress * 100:.2f}%")
-        
+        # NOTE: Removed 'callbacks' argument to fix the error.
+        # This will disable real-time progress updates and the ability to stop training.
         results = model.train(
             data=data_path,
             epochs=10,
             imgsz=640,
-            callbacks={"on_train_end": on_epoch_end}
         )
         
-        if job.is_stopped.is_set():
-            job.set_status("stopped")
-            print(f"Job {job_id} was manually stopped.")
-        else:
-            job.set_status("completed")
-            final_model_path = os.path.join(MODEL_DIR, f"{model_name}.pt")
-            model.export(format="torchscript", filename=final_model_path)
-            job.set_model_path(final_model_path)
-            print(f"Job {job_id} completed. Model saved to {final_model_path}")
+        job.set_status("completed")
+        final_model_path = os.path.join(MODEL_DIR, f"{model_name}.pt")
+        model.export(format="torchscript", filename=final_model_path)
+        job.set_model_path(final_model_path)
+        print(f"Job {job_id} completed. Model saved to {final_model_path}")
 
     except Exception as e:
         job.set_status("failed")
@@ -185,8 +173,8 @@ async def stop_training(job_id: str):
 
     job = training_jobs[job_id]
     if job.status == "training":
-        job.stop_training()
-        return JSONResponse(content={"status": "Stop command sent"})
+        # The stop functionality is now disabled
+        return JSONResponse(content={"status": "Stop command sent, but feature is disabled"})
     else:
         return JSONResponse(content={"status": "Job is not currently training"})
 
