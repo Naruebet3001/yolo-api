@@ -1,4 +1,4 @@
 flask
-uvicorn
-gunicorn
 ultralytics
+gunicorn
+uvicorn
