@@ -1,86 +1,205 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse, PlainTextResponse
-import shutil, subprocess, os, signal
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from ultralytics import YOLO
+import shutil
+import os
+import threading
+import uuid
+import yaml
+import zipfile
 
 app = FastAPI()
 
-UPLOAD_DIR = "datasets"
-LOG_DIR = "logs"
-RUNS_DIR = "runs"
-PID_FILE = "train_pid.txt"
+# Add CORS middleware to allow cross-origin requests from the PHP frontend
+origins = [
+    "*", # Allow all origins for simplicity in this example. In production, specify your frontend's domain.
+]
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Directory to store uploaded datasets and trained models
+UPLOAD_DIR = "/data/uploads" # Use a persistent disk path for Render
+MODEL_DIR = "/data/trained_models" # Use a persistent disk path for Render
+
+# Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(RUNS_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
+# Global dictionary to track training jobs
+training_jobs = {}
 
-@app.post("/upload")
-async def upload(dataset: UploadFile = File(...), config: UploadFile = File(...)):
-    dataset_path = os.path.join(UPLOAD_DIR, dataset.filename)
-    config_path = os.path.join(UPLOAD_DIR, config.filename)
+# (ส่วนที่เหลือของโค้ดใน main.py เหมือนเดิมทุกประการ)
+class TrainingJob:
+    def __init__(self, job_id, user_id):
+        self.job_id = job_id
+        self.user_id = user_id
+        self.status = "pending"
+        self.progress = 0
+        self.model_path = None
+        self.thread = None
+        self.is_stopped = threading.Event()
+        self.data_dir = None
 
-    with open(dataset_path, "wb") as f:
-        shutil.copyfileobj(dataset.file, f)
-    with open(config_path, "wb") as f:
-        shutil.copyfileobj(config.file, f)
+    def set_status(self, status):
+        self.status = status
 
-    return {"status": "uploaded", "dataset": dataset.filename, "config": config.filename}
+    def set_progress(self, progress):
+        self.progress = progress
 
+    def set_model_path(self, path):
+        self.model_path = path
 
-@app.get("/train")
-def train():
-    log_file = os.path.join(LOG_DIR, "train_log.txt")
-    with open(log_file, "w") as log:
-        process = subprocess.Popen(
-            ["python", "training_worker.py"],
-            stdout=log,
-            stderr=log,
+    def stop_training(self):
+        self.is_stopped.set()
+
+def train_yolo_model(job_id: str, data_path: str, model_name: str, job: TrainingJob):
+    try:
+        job.set_status("training")
+        
+        # Initialize YOLOv8 model
+        model = YOLO("yolov8n.pt")
+        
+        def on_epoch_end(trainer):
+            if job.is_stopped.is_set():
+                trainer.stop_training = True
+                return
+            
+            progress = (trainer.epoch + 1) / trainer.epochs
+            job.set_progress(progress * 100)
+            print(f"Job {job_id} - Epoch {trainer.epoch + 1}/{trainer.epochs} completed. Progress: {progress * 100:.2f}%")
+        
+        results = model.train(
+            data=data_path,
+            epochs=10,
+            imgsz=640,
+            callbacks={"on_train_end": on_epoch_end}
         )
-        with open(PID_FILE, "w") as f:
-            f.write(str(process.pid))
+        
+        if job.is_stopped.is_set():
+            job.set_status("stopped")
+            print(f"Job {job_id} was manually stopped.")
+        else:
+            job.set_status("completed")
+            final_model_path = os.path.join(MODEL_DIR, f"{model_name}.pt")
+            model.export(format="torchscript", filename=final_model_path)
+            job.set_model_path(final_model_path)
+            print(f"Job {job_id} completed. Model saved to {final_model_path}")
 
-    return {"status": "training started", "pid": process.pid}
+    except Exception as e:
+        job.set_status("failed")
+        print(f"Job {job_id} failed: {e}")
+    finally:
+        if job.data_dir and os.path.exists(job.data_dir):
+            shutil.rmtree(job.data_dir)
+            print(f"Cleaned up data directory: {job.data_dir}")
+        job.thread = None
 
+@app.post("/upload_and_train/")
+async def upload_and_train(dataset: UploadFile = File(...), yaml_file: UploadFile = File(...)):
+    """Endpoint to upload dataset and YAML file, then start training."""
+    job_id = str(uuid.uuid4())
+    user_id = "user_123"
 
-@app.get("/stop")
-def stop():
-    if os.path.exists(PID_FILE):
-        with open(PID_FILE) as f:
-            pid = int(f.read())
-        try:
-            os.kill(pid, signal.SIGKILL)
-            return {"status": f"stopped training process {pid}"}
-        except ProcessLookupError:
-            return {"status": f"process {pid} not found"}
-    return {"status": "no process running"}
+    try:
+        job_dir = os.path.join(UPLOAD_DIR, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        
+        zip_path = os.path.join(job_dir, dataset.filename)
+        with open(zip_path, "wb") as buffer:
+            shutil.copyfileobj(dataset.file, buffer)
+            
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(job_dir)
+        os.remove(zip_path)
 
+        yaml_path = os.path.join(job_dir, yaml_file.filename)
+        with open(yaml_path, "wb") as buffer:
+            shutil.copyfileobj(yaml_file.file, buffer)
+        
+        extracted_dirs = [d for d in os.listdir(job_dir) if os.path.isdir(os.path.join(job_dir, d))]
+        if not extracted_dirs:
+            raise Exception("No dataset folder found inside the zip file.")
+            
+        dataset_root = os.path.join(job_dir, extracted_dirs[0])
+        
+        with open(yaml_path, "r") as f:
+            data_config = yaml.safe_load(f)
+        
+        data_config['path'] = dataset_root
+        
+        with open(yaml_path, "w") as f:
+            yaml.dump(data_config, f)
 
-@app.get("/resume")
-def resume():
-    log_file = os.path.join(LOG_DIR, "train_log.txt")
-    with open(log_file, "a") as log:
-        process = subprocess.Popen(
-            ["python", "train.py", "--resume"],
-            stdout=log,
-            stderr=log,
+        job = TrainingJob(job_id, user_id)
+        job.data_dir = job_dir
+        training_jobs[job_id] = job
+        
+        job.thread = threading.Thread(
+            target=train_yolo_model,
+            args=(job_id, yaml_path, f"model_{job_id}", job)
         )
-        with open(PID_FILE, "w") as f:
-            f.write(str(process.pid))
+        job.thread.start()
 
-    return {"status": "resumed training", "pid": process.pid}
+        return JSONResponse(
+            content={"status": "Training started", "job_id": job_id},
+            status_code=202
+        )
 
+    except Exception as e:
+        return JSONResponse(
+            content={"status": "Failed to start training", "error": str(e)},
+            status_code=500
+        )
 
-@app.get("/logs")
-def get_logs():
-    log_file = os.path.join(LOG_DIR, "train_log.txt")
-    if os.path.exists(log_file):
-        return FileResponse(log_file, media_type="text/plain")
-    return PlainTextResponse("No logs yet.")
+@app.get("/status/{job_id}")
+async def get_training_status(job_id: str):
+    """Endpoint to get the status and progress of a training job."""
+    if job_id not in training_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
 
+    job = training_jobs[job_id]
+    
+    return JSONResponse(
+        content={
+            "job_id": job.job_id,
+            "status": job.status,
+            "progress": job.progress,
+            "model_path": job.model_path
+        }
+    )
 
-@app.get("/download")
-def download_model():
-    model_path = os.path.join(RUNS_DIR, "detect", "train", "weights", "best.pt")
-    if os.path.exists(model_path):
-        return FileResponse(model_path, filename="best.pt")
-    return {"status": "no model yet"}
+@app.post("/stop/{job_id}")
+async def stop_training(job_id: str):
+    """Endpoint to stop a training job."""
+    if job_id not in training_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = training_jobs[job_id]
+    if job.status == "training":
+        job.stop_training()
+        return JSONResponse(content={"status": "Stop command sent"})
+    else:
+        return JSONResponse(content={"status": "Job is not currently training"})
+
+@app.get("/download/{job_id}")
+async def download_model(job_id: str):
+    """Endpoint to download the trained model file."""
+    if job_id not in training_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = training_jobs[job_id]
+    if job.status != "completed" or not job.model_path:
+        raise HTTPException(status_code=400, detail="Model is not ready for download")
+
+    file_path = job.model_path
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Model file not found")
+        
+    return FileResponse(path=file_path, filename=os.path.basename(file_path), media_type='application/octet-stream')
