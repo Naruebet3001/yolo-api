@@ -1,18 +1,17 @@
-import os, subprocess, sys
+import os
+import subprocess
 
-# เก็บ pid ของตัวเอง
-with open("pid.txt", "w") as f:
-    f.write(str(os.getpid()))
+# สร้างโฟลเดอร์ runs ถ้ายังไม่มี
+os.makedirs("runs", exist_ok=True)
 
-# run yolov8
+# คำสั่ง train YOLOv8
 cmd = [
     "yolo", "detect", "train",
-    "data=datasets/data.yaml",
-    "model=yolov8n.pt",
-    "epochs=5", "imgsz=640",
-    "project=runs", "name=train"
+    "data=datasets/data.yaml",   # dataset ที่อัปโหลด (ต้องให้ชื่อ data.yaml ตรง)
+    "model=yolov8n.pt",          # base model
+    "epochs=10",                 # จำนวน epochs
+    "imgsz=640",                 # ขนาดภาพ
+    "project=runs", "name=detect/train"
 ]
 
 subprocess.run(cmd)
-
-
