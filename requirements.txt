@@ -1,5 +1,2 @@
-fastapi
-uvicorn
+flask
 ultralytics
-psutil
-python-multipart  # Add this line
