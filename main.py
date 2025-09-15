@@ -123,13 +123,18 @@ async def upload_and_train(dataset: UploadFile = File(...), yaml_file: UploadFil
         data_config['path'] = dataset_root
         
         if 'train' in data_config:
-            data_config['train'] = os.path.join(dataset_root, data_config['train'])
-        
-        if 'val' in data_config:
-            data_config['val'] = os.path.join(dataset_root, data_config['val'])
+    data_config['train'] = os.path.abspath(os.path.join(dataset_root, data_config['train']))
 
-        with open(yaml_path, "w") as f:
-            yaml.dump(data_config, f)
+if 'valid' in data_config:
+    valid_path = os.path.join(dataset_root, data_config['valid'])
+    if not os.path.exists(valid_path):
+        # ถ้า valid ไม่มี ให้ใช้ train แทน
+        valid_path = data_config['train']
+    data_config['valid'] = os.path.abspath(valid_path)
+
+# เขียน YAML กลับ
+with open(yaml_path, "w") as f:
+    yaml.dump(data_config, f)
         # --- สิ้นสุดการแก้ไข ---
 
         job = TrainingJob(job_id, user_id)
@@ -197,3 +202,4 @@ async def download_model(job_id: str):
         raise HTTPException(status_code=404, detail="Model file not found")
         
     return FileResponse(path=file_path, filename=os.path.basename(file_path), media_type='application/octet-stream')
+
